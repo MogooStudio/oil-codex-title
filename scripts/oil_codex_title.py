@@ -20,6 +20,7 @@ from codex_adapter import BackendError, ModelSkipped, CodexBackend, find_codex, 
 import file_lock
 from usage_ledger import usage_scope, usage_report
 from model_config import validate_model_config, effective_model_config
+from title_time import display_title, managed_base_title
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {
@@ -33,6 +34,7 @@ DEFAULTS = {
     "max_context_chars": 14000,
     "model_timeout_seconds": 100,
     "max_parallel_workers": 2,
+    "show_last_user_time": True,
 }
 EMOJI = ("🎬", "🧩", "🔎", "📝", "📅", "🎨", "⚙️", "💬")
 POLICY_VERSION = 8
@@ -72,6 +74,8 @@ def atomic_json(path, value):
 def validate_config(config):
     if not isinstance(config["enabled"], bool):
         raise ValueError("enabled 必须是布尔值")
+    if not isinstance(config["show_last_user_time"], bool):
+        raise ValueError("show_last_user_time 必须是布尔值")
     for key, lower, upper in (("recent_turns", 3, 5), ("max_context_chars", 3000, 20000),
                               ("model_timeout_seconds", 10, 110), ("max_parallel_workers", 1, 8)):
         if type(config[key]) is not int or not lower <= config[key] <= upper:
@@ -130,6 +134,8 @@ def update_config(root, command, args=None):
                 service_tier=args.service_tier, base_url=args.base_url, api_key_env=args.api_key_env)
             if args.codex_bin:
                 saved["codex_bin"] = find_codex(args.codex_bin)
+            if getattr(args, "title_time", None) is not None:
+                saved["show_last_user_time"] = args.title_time == "on"
         validate_config(DEFAULTS | saved)
         atomic_json(root / "config.json", saved)
         return load_config(root)
@@ -266,7 +272,7 @@ def conflicting_titles(root, thread_id, candidate, scope_key=""):
             continue
         if state.get("scope_key", "") != scope_key:
             continue
-        other = state.get("last_seen_title")
+        other = state.get("last_base_title", state.get("last_seen_title"))
         if other == candidate:
             conflicts.add(other)
     return sorted(conflicts)
@@ -280,7 +286,7 @@ def item_text(item):
     return clean_text(item.get("text", ""))
 
 
-def snapshot(thread, config):
+def snapshot(thread, config, *, base_title=None):
     """只给命名模型用户与最终回答；用最新轮次 ID 检测生成期间的新活动。"""
     turns = thread.get("turns", [])
     effective = []
@@ -310,7 +316,7 @@ def snapshot(thread, config):
     if effective:
         original = next(m["text"] for m in effective[0]["messages"] if m["role"] == "user")[:800]
     latest_id = turns[-1]["id"] if turns else None
-    context = {"current_title": title, "project_hint": project_hint(thread),
+    context = {"current_title": title if base_title is None else base_title, "project_hint": project_hint(thread),
                "original_goal": original, "recent_turns": recent}
     signature = json.dumps({"policy_version": POLICY_VERSION, "project_hint": context["project_hint"],
                            "latest_id": latest_id, "effective": effective[-config["recent_turns"]:]},
@@ -357,7 +363,7 @@ def confirmation_only(thread, state, config):
     """仅在基线仍一致时跳过最多两轮纯确认；附件、遗漏轮次或规则升级均重新判断。"""
     if state.get("policy_version") != POLICY_VERSION or not state.get("last_fingerprint"):
         return 0
-    current = thread.get("name") or ""
+    current = managed_base_title(state, thread.get("name") or "")
     try:
         validate_candidate({"action": "rename", "title": current, "reason": ""}, current)
     except ValueError:
@@ -414,12 +420,15 @@ def _process_thread(backend, generator, thread_id, root, config, *, apply=False,
                 return {"status": pending}
         else:
             thread = backend.read(thread_id)
-        before = snapshot(thread, config)
+        base_before = managed_base_title(state, thread.get("name") or "")
+        before = snapshot(thread, config, base_title=base_before)
         if not before["has_messages"]:
             return {"status": "empty"}
         # 上次写入后进程被中断时，先核对待确认结果，避免误认作手工改名。
         if state.get("pending_title") == before["title"]:
             state.update(last_seen_title=before["title"], last_generated_title=before["title"])
+            if "pending_base_title" in state:
+                state["last_base_title"] = state.pop("pending_base_title")
             state.pop("pending_title", None)
             if apply:
                 atomic_json(path, state)
@@ -439,18 +448,20 @@ def _process_thread(backend, generator, thread_id, root, config, *, apply=False,
                 state.update(locked=True, lock_reason="检测到外部改名", last_seen_title=before["title"])
                 atomic_json(path, state)
             return {"status": "manual_title", "title": before["title"]}
-        if state.get("last_fingerprint") == before["fingerprint"]:
+        unchanged = state.get("last_fingerprint") == before["fingerprint"]
+        if unchanged and display_title(base_before, thread, config["show_last_user_time"]) == before["title"]:
             return {"status": "unchanged", "title": before["title"]}
-        skipped = confirmation_only(thread, state, config)
+        skipped = 0 if unchanged else confirmation_only(thread, state, config)
         try:
             ensure_title_active(backend, thread_id, root)
-            if skipped:
-                candidate, usage = {"action": "keep", "title": before["title"], "reason": "新增内容仅为确认，保留稳定标题"}, {}
+            if unchanged or skipped:
+                candidate, usage = {"action": "keep", "title": base_before,
+                                    "reason": "内容未变，仅更新发言时间" if unchanged else "新增内容仅为确认，保留稳定标题"}, {}
             else:
                 candidate, usage = generator(before["context"])
         except ModelSkipped as exc:
             return {"status": exc.status}
-        candidate = validate_candidate(candidate, before["title"])
+        candidate = validate_candidate(candidate, base_before)
         conflicts = conflicting_titles(root, thread_id, candidate["title"], before["scope_key"])
         if candidate["action"] == "rename" and conflicts:
             try:
@@ -459,12 +470,17 @@ def _process_thread(backend, generator, thread_id, root, config, *, apply=False,
                     "naming_feedback": "候选与已记录任务重名。用对话里真实的项目、模块或内容主题区分；无法区分就保留原名，不编造编号。"})
             except ModelSkipped as exc:
                 return {"status": exc.status, "usage": usage}
-            candidate = validate_candidate(candidate, before["title"])
+            candidate = validate_candidate(candidate, base_before)
             usage = {key: usage.get(key, 0) + retry_usage.get(key, 0)
                      for key in usage.keys() | retry_usage.keys()}
             if candidate["action"] == "rename" and conflicting_titles(root, thread_id, candidate["title"], before["scope_key"]):
                 return {"status": "ambiguous_title", "title": before["title"], "usage": usage}
         result = {"status": "preview", **candidate, "usage": usage}
+        result["title"] = display_title(candidate["title"], thread, config["show_last_user_time"])
+        if result["title"] != before["title"]:
+            result["action"] = "rename"
+        if candidate["title"] == base_before and result["title"] != before["title"]:
+            result["time_updated"] = True
         if skipped:
             result["skip_reason"] = "confirmation_only"
         if not apply:
@@ -478,31 +494,38 @@ def _process_thread(backend, generator, thread_id, root, config, *, apply=False,
             return {"status": "locked"}
         if backend.is_archived(thread_id):
             return {"status": "archived"}
-        after = snapshot(backend.read(thread_id), config)
+        fresh_thread = backend.read(thread_id)
+        after = snapshot(fresh_thread, config)
         if after["title"] != before["title"] or after["fingerprint"] != before["fingerprint"]:
             return {"status": "stale_result"}
         state.update(last_seen_title=before["title"], last_turn_id=before["latest_id"],
                      scope_key=before["scope_key"], updated_at=int(time.time()),
                      policy_version=POLICY_VERSION,
                      confirmation_skips=state.get("confirmation_skips", 0) + skipped if skipped else 0)
-        if candidate["action"] == "rename" and candidate["title"] != before["title"]:
-            state["pending_title"] = candidate["title"]
+        rendered = display_title(candidate["title"], fresh_thread, fresh_config["show_last_user_time"])
+        result["title"] = rendered
+        if rendered != before["title"]:
+            result["action"] = "rename"
+            state["pending_title"] = rendered
+            state["pending_base_title"] = candidate["title"]
             atomic_json(path, state)
             try:
-                backend.rename(thread_id, candidate["title"])
+                backend.rename(thread_id, rendered)
             except BackendError:
                 # 网络/进程错误可能发生在写入成功后，先读回确认，不盲目重试。
-                if snapshot(backend.read(thread_id), config)["title"] != candidate["title"]:
+                if snapshot(backend.read(thread_id), config)["title"] != rendered:
                     raise
             verified = snapshot(backend.read(thread_id), config)
-            if verified["title"] != candidate["title"]:
+            if verified["title"] != rendered:
                 raise BackendError("标题写入后核验不一致")
-            state.update(last_seen_title=candidate["title"], last_generated_title=candidate["title"])
+            state.update(last_seen_title=rendered, last_generated_title=rendered)
             state.pop("pending_title", None)
+            state.pop("pending_base_title", None)
             result["status"] = "renamed"
             result["verification"] = "metadata_only"
         else:
             result["status"] = "kept"
+        state["last_base_title"] = candidate["title"]
         state["last_fingerprint"] = before["fingerprint"]
         atomic_json(path, state)
         audit(root, thread_id, result)
@@ -569,6 +592,7 @@ def main():
     p.add_argument("--provider", choices=("official", "relay"), help="默认官方；中转站需显式选择 relay")
     p.add_argument("--base-url", help="中转站 Responses API 基础地址，例如 https://relay.example/v1")
     p.add_argument("--api-key-env", help="保存中转站密钥的环境变量名；不要填写密钥值")
+    p.add_argument("--title-time", choices=("on", "off"), help="显示或隐藏最后用户发言时间，默认 on")
     for name in ("rename", "lock", "unlock"):
         p = sub.add_parser(name)
         p.add_argument("thread_id")

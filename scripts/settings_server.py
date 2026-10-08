@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 import webbrowser
 
 from codex_adapter import BackendError, worker_env
-from oil_codex_title import atomic_json, load_config, model_config_changes, read_json, thread_lock
+from oil_codex_title import atomic_json, load_config, model_config_changes, read_json, thread_lock, validate_config, DEFAULTS
 from user_environment import persist_user_key, validate_key_input
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets/settings"
@@ -32,11 +32,11 @@ def settings_view(root):
             "relay": ({**relay, "service_tier": "fast" if relay.get("service_tier") else "standard"}
                       if relay else None), "config_path": str(root / "config.json"), "revision": revision(root),
             "api_key_present": bool(relay and worker_env().get(relay["api_key_env"], "").strip()),
-            "key_management_supported": sys.platform == "win32"}
+            "key_management_supported": sys.platform == "win32", "show_last_user_time": config["show_last_user_time"]}
 
 
 def save_settings(root, payload):
-    fields = {"revision", "provider", "model", "service_tier", "base_url", "api_key_env"}
+    fields = {"revision", "provider", "model", "service_tier", "base_url", "api_key_env", "show_last_user_time"}
     if not isinstance(payload, dict) or set(payload) - fields:
         raise ValueError("设置仅接受模式、模型、档位、API 地址和密钥环境变量名")
     if not all(isinstance(payload.get(key), str) for key in ("revision", "provider", "model", "service_tier")):
@@ -46,6 +46,8 @@ def save_settings(root, payload):
     for key in ("base_url", "api_key_env"):
         if key in payload and not isinstance(payload[key], str):
             raise ValueError("API 地址和密钥环境变量名必须是文本")
+    if "show_last_user_time" in payload and type(payload["show_last_user_time"]) is not bool:
+        raise ValueError("显示最后发言时间必须是布尔值")
     with thread_lock(root, "config", wait_seconds=3) as acquired:
         if not acquired:
             raise BackendError("配置正在保存，请稍后重试")
@@ -55,6 +57,9 @@ def save_settings(root, payload):
         changes = model_config_changes(config, read_json(root / "config.json"),
             provider=payload["provider"], model=payload["model"], service_tier=payload["service_tier"],
             base_url=payload.get("base_url"), api_key_env=payload.get("api_key_env"))
+        if "show_last_user_time" in payload:
+            changes["show_last_user_time"] = payload["show_last_user_time"]
+        validate_config(DEFAULTS | changes)
         atomic_json(root / "config.json", changes)
         return settings_view(root)
 

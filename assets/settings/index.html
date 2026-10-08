@@ -27,6 +27,7 @@
         </div>
         <div class="field"><label for="model">模型 ID</label><input id="model" type="text" required autocomplete="off" spellcheck="false"><p id="model-help"></p></div>
         <div class="tier-row"><div><label for="fast-tier">Fast 档位</label><p>仅在服务和模型支持时开启。更换模型默认回到标准档位。</p></div><label class="switch"><input id="fast-tier" type="checkbox" role="switch" aria-label="Fast 档位"><span aria-hidden="true"></span></label></div>
+        <div class="tier-row timestamp-row"><div><label for="title-time">显示最后发言时间</label><p>标题末尾追加用户最后发言的时间，例如 · 10-08 14:30，使用本机时区。</p></div><label class="switch"><input id="title-time" type="checkbox" role="switch" aria-label="显示最后发言时间"><span aria-hidden="true"></span></label></div>
       </section>
       <footer class="actions"><div><span id="save-status" role="status" aria-live="polite">配置已读取</span><p>选择模式后，点击保存才会切换。</p></div><div class="action-buttons"><button id="reload" type="button" class="secondary">重新读取</button><button id="save" type="submit" disabled>保存配置<span aria-hidden="true">↗</span></button></div></footer>
     </form>

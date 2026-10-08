@@ -7,6 +7,7 @@ let drafts = {};
 let mode = "official";
 let busy = false;
 let keyBusy = false;
+let timeDraft = true;
 const knownKeys = new Set();
 const keyDialog = byId("key-dialog");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -29,6 +30,7 @@ function message(text, type = "") {
   byId("save-status").className = type;
 }
 function takeDraft() {
+  timeDraft = byId("title-time").checked;
   drafts[mode] = {model: byId("model").value, service_tier: byId("fast-tier").checked ? "fast" : "standard",
     ...(mode === "relay" ? {base_url: byId("base-url").value, api_key_env: byId("api-key-env").value} : {})};
 }
@@ -46,8 +48,8 @@ function changed() {
   const original = mode === "official" ? snapshot.official : snapshot.relay;
   // 以字段值比较，避免 JSON 属性顺序造成伪变更。
   const equal = original && Object.keys(drafts[mode]).every((key) => drafts[mode][key] === original[key]);
-  const dirty = mode !== snapshot.provider || !equal;
-  byId("save").disabled = busy || (mode === snapshot.provider && equal);
+  const dirty = mode !== snapshot.provider || !equal || timeDraft !== snapshot.show_last_user_time;
+  byId("save").disabled = busy || !dirty;
   if (dirty && !busy) message("有未保存的更改");
   else if (!busy) message("配置已读取");
   updateKeyStatus();
@@ -66,6 +68,7 @@ function showMode() {
     "填写保存 API Key 的变量名，或点击右侧按钮设置密钥。" : "此系统请通过环境变量设置密钥；对话框保存目前支持 Windows。";
   byId("model").value = drafts[mode].model;
   byId("fast-tier").checked = drafts[mode].service_tier === "fast";
+  byId("title-time").checked = timeDraft;
   byId("base-url").value = drafts.relay.base_url;
   byId("api-key-env").value = drafts.relay.api_key_env;
   byId("model-help").textContent = relay ? "填写中转站提供的准确模型 ID。" : "默认使用 gpt-5.6-luna；模型需对当前官方账号可用。";
@@ -76,6 +79,7 @@ function adopt(data) {
   drafts = {official: {...data.official}, relay: {...(data.relay || {
     base_url: "", api_key_env: "OIL_TITLE_RELAY_KEY", model: "", service_tier: "standard"})}};
   mode = data.provider;
+  timeDraft = data.show_last_user_time ?? true;
   byId("saved-mode").textContent = "当前：" + (mode === "official" ? "官方账号" : "中转站");
   byId("config-path").textContent = data.config_path;
   form.hidden = false;
@@ -105,7 +109,7 @@ byId("model").addEventListener("input", () => {
   if (!original || byId("model").value !== original.model) byId("fast-tier").checked = false;
   changed();
 });
-["base-url", "api-key-env", "fast-tier"].forEach((id) => byId(id).addEventListener("input", changed));
+["base-url", "api-key-env", "fast-tier", "title-time"].forEach((id) => byId(id).addEventListener("input", changed));
 byId("reload").addEventListener("click", reload);
 function closeKeyDialog() {
   if (!keyBusy) keyDialog.close();
@@ -156,7 +160,7 @@ byId("key-form").addEventListener("submit", async (event) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   takeDraft();
-  const payload = {revision: snapshot.revision, provider: mode, ...drafts[mode]};
+  const payload = {revision: snapshot.revision, provider: mode, ...drafts[mode], show_last_user_time: timeDraft};
   setBusy(true);
   message("正在保存…");
   let result;

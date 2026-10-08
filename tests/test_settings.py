@@ -138,6 +138,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(view["official"], {"model": "new-official-model", "service_tier": "standard"})
         self.assertEqual(self.save()[0], 200)
 
+    def test_time_switch_is_global_and_retained_when_switching_provider(self):
+        self.assertTrue(self.request()[1]['show_last_user_time'])
+        code, view, _ = self.save(show_last_user_time=False)
+        self.assertEqual(code, 200, view)
+        self.assertFalse(view['show_last_user_time'])
+        self.assertFalse(self.save('official')[1]['show_last_user_time'])
+        code, view, _ = self.save(show_last_user_time='off')
+        self.assertEqual(code, 400)
+        self.assertFalse(app.load_config(self.root)['show_last_user_time'])
+
     def test_key_save_only_calls_user_environment_writer_without_config_write_or_echo(self):
         code, result, _ = self.request("/api/key", method="PUT", data={
             "api_key_env": "OIL_TITLE_RELAY_KEY", "api_key": "synthetic-test-key"})
