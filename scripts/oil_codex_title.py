@@ -21,6 +21,8 @@ import file_lock
 from usage_ledger import usage_scope, usage_report
 from model_config import validate_model_config, effective_model_config
 from title_time import display_title, managed_base_title
+import handoff
+from worker_identity import owner_process
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {
@@ -35,6 +37,8 @@ DEFAULTS = {
     "model_timeout_seconds": 100,
     "max_parallel_workers": 2,
     "show_last_user_time": True,
+    "worker_owner_sid": None,
+    "worker_task_enabled": False,
 }
 EMOJI = ("🎬", "🧩", "🔎", "📝", "📅", "🎨", "⚙️", "💬")
 POLICY_VERSION = 8
@@ -43,7 +47,7 @@ POLICY_VERSION = 8
 def data_dir():
     override = os.environ.get("OIL_CODEX_TITLE_DATA")
     return Path(override).expanduser() if override else Path(
-        os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+        os.environ.get("CODEX_HOME") or str(Path(os.environ.get("USERPROFILE", str(Path.home()))) / ".codex")
     ) / "oil-codex-title"
 
 
@@ -76,6 +80,11 @@ def validate_config(config):
         raise ValueError("enabled 必须是布尔值")
     if not isinstance(config["show_last_user_time"], bool):
         raise ValueError("show_last_user_time 必须是布尔值")
+    if not isinstance(config["worker_task_enabled"], bool):
+        raise ValueError("worker_task_enabled 必须是布尔值")
+    if config['worker_owner_sid'] is not None and not (
+        isinstance(config['worker_owner_sid'], str) and re.fullmatch(r'S-\d+(?:-\d+)+', config['worker_owner_sid'])):
+        raise ValueError('worker_owner_sid 必须是 Windows SID 或 null')
     for key, lower, upper in (("recent_turns", 3, 5), ("max_context_chars", 3000, 20000),
                               ("model_timeout_seconds", 10, 110), ("max_parallel_workers", 1, 8)):
         if type(config[key]) is not int or not lower <= config[key] <= upper:
@@ -539,6 +548,8 @@ def doctor(binary, root, config, thread_id=None):
     effective = effective_model_config(config)
     output["model_connection"] = {"provider": config["provider"], "model": effective["model"],
                                   "inference": "not_verified"}
+    output['handoff'] = {'owner_process': owner_process(config), 'task_enabled': config['worker_task_enabled'],
+                         'queue_dir': str(handoff.queue_dir(root)), 'natural_stop': 'not_verified'}
     if config["provider"] == "relay":
         env_key = config["relay"]["api_key_env"]
         output["model_connection"].update(api_key_env=env_key,
@@ -568,6 +579,33 @@ def doctor(binary, root, config, thread_id=None):
     return output
 
 
+def run_naming(binary, root, config, thread_id, turn_id):
+    with CodexBackend(binary) as backend:
+        result = process_thread(backend, lambda context: limited_title(binary, root, config, context,
+            before_model=lambda: ensure_title_active(backend, thread_id, root)),
+            thread_id, root, config, apply=True, event_turn=turn_id)
+    audit(root, thread_id, {'status': 'worker_result', 'result_status': result['status']})
+    return result
+
+
+def run_worker(root, config):
+    if not owner_process(config):
+        raise BackendError('worker 不是已配置的用户身份，拒绝消费队列')
+    audit(root, 'worker', {'status': 'worker_started', 'owner_process': True})
+    def process_one(payload):
+        fresh = load_config(root)
+        from worker_setup import hydrate_relay_key
+        hydrate_relay_key(fresh)
+        try:
+            return run_naming(find_codex(fresh['codex_bin']), root, fresh,
+                              valid_id(payload['thread_id']), valid_id(payload['turn_id']))
+        except Exception as exc:
+            audit(root, payload['thread_id'], {'status': 'worker_error', 'error_type': type(exc).__name__,
+                                               'diagnostic': getattr(exc, 'diagnostic', None)})
+            raise
+    return handoff.run_worker(handoff.queue_dir(root), process_one)
+
+
 def main():
     # Hook 事件使用 UTF-8；不能依赖 Windows 当前代码页解释中文内容。
     for stream in (sys.stdin, sys.stdout, sys.stderr):
@@ -576,6 +614,9 @@ def main():
     parser = argparse.ArgumentParser(description="独立模型驱动的 Codex 话题命名")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("hook", help="读取 Stop Hook stdin；保持宿主输出为空 JSON")
+    sub.add_parser('worker', help='以当前用户身份消费移交队列')
+    p = sub.add_parser('worker-setup', help='配置 Windows 当前用户的周期 worker，仅授权插件队列')
+    p.add_argument('--remove', action='store_true', help='移除本插件 worker 任务并撤销队列授权')
     p = sub.add_parser("doctor", help="只读检查运行环境")
     p.add_argument("--thread")
     sub.add_parser("status", help="显示配置和本地记录数量")
@@ -617,6 +658,37 @@ def main():
                 return 0
             thread_id = valid_id(event["session_id"])
             turn_id = valid_id(event["turn_id"])
+            own = owner_process(config)
+            if not own and not config['worker_task_enabled']:
+                raise BackendError('当前 Hook 是沙箱身份；请先用当前用户运行 worker-setup')
+            delivered = handoff.submit(handoff.queue_dir(root), thread_id, turn_id)
+            if own:
+                launched = handoff.spawn_worker(ROOT / 'scripts/oil_codex_title.py')
+                launch_type = 'same_user_process'
+            else:
+                launched = handoff.trigger_task(handoff.task_name(root))
+                launch_type = 'user_task'
+            try:
+                audit(root, thread_id, {'status': 'hook_queued', 'delivery': delivered['status'],
+                    'owner_process': own, 'launch_requested': launched, 'launch_type': launch_type})
+            except OSError:
+                pass
+            return 0
+        if args.command == 'worker':
+            print(json.dumps(run_worker(root, config), ensure_ascii=False))
+            return 0
+        if args.command == 'worker-setup':
+            from worker_setup import setup
+            report = setup(root, config, ROOT, remove=args.remove)
+            with thread_lock(root, 'config', wait_seconds=3) as acquired:
+                if not acquired:
+                    raise BackendError('配置正在保存，请重试 worker-setup')
+                saved = read_json(root / 'config.json')
+                saved.update(worker_owner_sid=report.pop('owner_sid'), worker_task_enabled=not args.remove)
+                validate_config(DEFAULTS | saved)
+                atomic_json(root / 'config.json', saved)
+            print(json.dumps(report, ensure_ascii=False))
+            return 0
         if args.command in ("pause", "resume", "configure"):
             print(json.dumps(update_config(root, args.command, args), ensure_ascii=False))
             return 0

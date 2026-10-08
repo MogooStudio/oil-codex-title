@@ -60,6 +60,16 @@ codex plugin add oil-codex-title@mogoo-oil-title
 
 安装和更新不会自动信任 Hook；请在 Codex 官方 Hook 管理界面检查并信任新定义。
 
+### Windows 后台命名
+
+从 0.4.0 起，Hook 先把本轮检查交给后台 worker，再结束回调。若 Windows 的 Hook 运行在 Codex 沙箱身份下，还需配置当前用户的后台任务。可以直接对 Codex 说：
+
+```text
+帮我配置 oil-codex-title 的 Windows 后台 worker，检查用户身份、队列权限和任务状态，并告诉我怎样重新信任新版 Hook。
+```
+
+任务只处理本插件的标题队列，使用当前登录用户的身份；不会改变中转站 / 官方模式。升级到本版后需重新信任 Hook。配置命令、撤销方法和实际触发验收见 [Windows 后台队列说明](docs/Windows队列与worker.md)。
+
 ### 从旧来源迁移
 
 若已安装上游或本地来源的同名插件，应先移除旧市场中的同名条目，再卸载旧插件，避免市场刷新时重新加载旧 Hook。保留市场中的其他插件。以旧来源为 `personal` 为例，清理其 `marketplace.json` 条目后执行：
@@ -182,7 +192,7 @@ python3 scripts/oil_codex_title.py configure --title-time on
 
 ## 兼容性与验证
 
-需要 Python 3.10+ 和兼容的本地 Codex CLI。Windows、macOS、Linux 的跨平台程序测试已通过；Windows 密钥对话框的注册表写入与读回使用隔离测试项验证。中转站真实模型调用已验证，各宿主的 Stop Hook 自动触发和桌面显示仍需分别验收，不能以 `doctor` 成功替代。
+需要 Python 3.10+ 和兼容的本地 Codex CLI。此前版本的 Windows、macOS、Linux 程序测试已通过；0.4.0 的后台队列需另外运行跨平台验证。Windows 密钥对话框的注册表写入与读回使用隔离测试项验证。中转站真实模型调用已验证，各宿主的 Stop Hook 自动触发和桌面显示仍需分别验收，不能以 `doctor` 成功替代。
 
 目前为**预览版**，云端不支持此本地插件。部分桌面版本的置顶列表可能仍显示旧标题，可让 Codex「检查真实标题并同步桌面显示」。
 

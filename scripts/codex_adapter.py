@@ -18,7 +18,21 @@ from model_config import effective_model_config
 
 
 class BackendError(RuntimeError):
-    pass
+    def __init__(self, message, *, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+def diagnostic_category(value):
+    # 仅输出固定类别，不把模型 stderr、路径、认证头或提示词写入日志。
+    text = str(value or '').casefold()
+    groups = [('permission_denied', ('access denied', 'permission denied', 'wsaeacces')),
+              ('authentication_failed', ('unauthorized', '401', 'authentication failed')),
+              ('forbidden', ('forbidden', '403')),
+              ('skills_budget', ('skills context budget',)),
+              ('model_unavailable', ('model not found', 'unsupported model', 'model_not_found')),
+              ('connection_failed', ('connection refused', 'failed to connect', 'timed out'))]
+    return next((name for name, patterns in groups if any(part in text for part in patterns)), 'unknown')
 
 
 class ModelSkipped(BackendError):
@@ -83,6 +97,8 @@ def worker_env() -> dict[str, str]:
     for key in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH"):
         env.pop(key, None)
     env["OIL_CODEX_TITLE_WORKER"] = "1"
+    if sys.platform == 'win32' and not env.get('CODEX_HOME') and env.get('USERPROFILE'):
+        env['CODEX_HOME'] = str(Path(env['USERPROFILE']) / '.codex')
     return env
 
 
@@ -95,14 +111,16 @@ class CodexBackend:
         self.messages = queue.Queue()
         self.counter = 0
         self.disable_hooks = disable_hooks
+        self.diagnostics = queue.Queue()
 
     def __enter__(self):
         self.proc = subprocess.Popen(
             [self.binary, "app-server"] + (["--disable", "hooks"] if self.disable_hooks else []),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             encoding="utf-8", env=worker_env(), **process_options(),
         )
         threading.Thread(target=self._reader, daemon=True).start()
+        threading.Thread(target=self._stderr_reader, daemon=True).start()
         try:
             self.call("initialize", {
                 "clientInfo": {"name": "oil-codex-title", "version": "0.1.0"},
@@ -127,6 +145,29 @@ class CodexBackend:
         self.proc.stdin.write(json.dumps(value, ensure_ascii=False) + "\n")
         self.proc.stdin.flush()
 
+    def _stderr_reader(self):
+        try:
+            for line in self.proc.stderr:
+                self.diagnostics.put(diagnostic_category(line))
+                while self.diagnostics.qsize() > 8:
+                    try:
+                        self.diagnostics.get_nowait()
+                    except queue.Empty:
+                        break
+        except (OSError, ValueError):
+            pass
+
+    def _closed_error(self):
+        kinds = []
+        while True:
+            try:
+                kinds.append(self.diagnostics.get_nowait())
+            except queue.Empty:
+                break
+        kind = next((value for value in kinds if value != 'unknown'), 'unknown')
+        code = self.proc.poll() if self.proc else None
+        return BackendError(f'App Server 连接已关闭（退出码={code}，类别={kind}）', diagnostic=kind)
+
     def call(self, method, params):
         self.counter += 1
         request_id = self.counter
@@ -138,7 +179,7 @@ class CodexBackend:
             except queue.Empty as exc:
                 raise BackendError("App Server 请求超时：" + method) from exc
             if message is None:
-                raise BackendError("App Server 连接已关闭")
+                raise self._closed_error()
             if message.get("id") != request_id:
                 if time.monotonic() > deadline:
                     raise BackendError("App Server 请求超时：" + method)
@@ -190,7 +231,7 @@ class CodexBackend:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=3)
-        for stream in (self.proc.stdin, self.proc.stdout):
+        for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             if stream:
                 stream.close()
 
@@ -291,7 +332,8 @@ def generate_json(binary, config, context, policy, output_schema, *, before_mode
             usage, forbidden_tool = parse_usage(proc.stdout)
             status = "process_error"
             if proc.returncode or not output.exists():
-                raise BackendError("独立命名模型失败；请检查登录、模型配置和 doctor")
+                kind = diagnostic_category(getattr(proc, 'stderr', ''))
+                raise BackendError(f'独立命名模型失败（退出码={proc.returncode}，类别={kind}）；请检查 doctor', diagnostic=kind)
             status = "rejected_tool"
             if forbidden_tool:
                 raise BackendError("命名模型尝试调用工具，本次结果已丢弃")
