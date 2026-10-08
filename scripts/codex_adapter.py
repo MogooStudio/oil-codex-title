@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from usage_ledger import begin_attempt, parse_usage
+from model_config import effective_model_config
 
 
 class BackendError(RuntimeError):
@@ -239,7 +240,12 @@ def _generate_title_once(binary, config, context, plugin_root, *, before_model=N
 def generate_json(binary, config, context, policy, output_schema, *, before_model=None):
     """隔离的无工具临时模型，供命名和归档评估共用。"""
     deadline = time.monotonic() + config["model_timeout_seconds"]
-    # 复用当前登录；不复制凭据，不恢复原会话，不保留独立会话记录。
+    config = effective_model_config(config)
+    env = worker_env()
+    relay = config.get("relay") if config.get("provider") == "relay" else None
+    if relay and not env.get(relay["api_key_env"], "").strip():
+        raise BackendError("中转站密钥环境变量未设置：" + relay["api_key_env"])
+    # 官方复用登录，中转站只继承密钥环境变量；不恢复原会话或保留独立会话记录。
     with tempfile.TemporaryDirectory(prefix="oil-codex-title-") as tmp:
         temp = Path(tmp)
         schema = temp / "schema.json"
@@ -251,13 +257,23 @@ def generate_json(binary, config, context, policy, output_schema, *, before_mode
             "--disable", "hooks", "--disable", "shell_tool",
             "--disable", "plugins", "--disable", "apps", "--disable", "multi_agent",
             "-m", config["model"], "-c", 'model_reasoning_effort="low"',
-            "-c", "project_doc_max_bytes=0", "-c", "skills.max_context_tokens=1",
+            "-c", "project_doc_max_bytes=0",
             "-c", "agents.enabled=false", "-c", 'web_search="disabled"',
+            "-c", "features.goals=false", "-c", "features.view_image=false", "-c", "tools.view_image=false",
             "-c", "apps._default.enabled=false",
             "-c", "model_instructions_file=" + json.dumps(str(policy)),
             "--output-schema", str(schema), "--output-last-message", str(output),
             "--json", "-",
         ]
+        if relay:
+            provider = {"name": "oil-codex-title relay", "base_url": relay["base_url"],
+                        "env_key": relay["api_key_env"], "wire_api": "responses",
+                        "requires_openai_auth": False, "supports_websockets": False}
+            # -c 的值是 TOML；各字符串用 JSON 编码，避免地址或模型名改变参数结构。
+            table = "{ " + ", ".join(key + " = " + json.dumps(value, ensure_ascii=False)
+                                    for key, value in provider.items()) + " }"
+            args[2:2] = ["-c", 'model_provider="oil_title_relay"',
+                         "-c", "model_providers.oil_title_relay=" + table]
         if config.get("service_tier"):
             args[2:2] = ["-c", "service_tier=" + json.dumps(config["service_tier"])]
         # 配额等待和每次内部重试之后，紧接真实模型进程启动前复核。
@@ -270,7 +286,7 @@ def generate_json(binary, config, context, policy, output_schema, *, before_mode
         usage, status = {}, "interrupted"
         try:
             proc = subprocess.run(args, input=json.dumps(context, ensure_ascii=False),
-                                  capture_output=True, encoding="utf-8", env=worker_env(),
+                                  capture_output=True, encoding="utf-8", env=env,
                                   timeout=remaining, **process_options())
             usage, forbidden_tool = parse_usage(proc.stdout)
             status = "process_error"

@@ -24,6 +24,12 @@ Windows 下将示例的 `python3` 换成 `py -3`，需要已安装 Python Launch
 3. 需要配置时，执行 `configure --model <模型 ID> --service-tier fast` 或 `--service-tier standard`；修正可执行文件使用 `configure --codex-bin <路径>`。模型和档位应来自用户选择或当前可用列表，不猜模型名。默认 Luna Fast，Spark 使用 standard。
 4. 安装及信任步骤见插件根目录的 `README.md`。只通过官方插件安装和 Hook 信任入口操作，不修改信任数据库，也不加绕过信任的参数。
 
+用户明确要求中转站时，读取插件根目录 `docs/使用与边界.md` 的「可选中转站配置」，用 `configure --provider relay --base-url <API基础地址> --api-key-env <密钥环境变量名> --model <模型ID>` 配置。密钥通过宿主环境提供，只保存变量名。默认官方模式保持原版行为；`configure --provider official` 切回已保存的官方模型与档位。`--model` 和 `--service-tier` 修改选中模式；中转站默认标准档位。`doctor` 的密钥存在检查和 App Server 就绪不能代替模型实测。
+
+用户要可视化配置时，运行 `settings --no-browser` 并保持本地服务运行，将输出 JSON 中的 `url` 用宿主浏览器打开。Windows 后台启动使用隐藏窗口。页面由用户选择并保存，与 Hook 共用配置；只打开页面不会切换模式。服务仅监听回环地址，停止后入口失效；完整行为见 `docs/使用与边界.md` 的「本地可视化设置」。
+
+Windows 页面提供「设置密钥」对话框，由用户输入和保存到当前用户环境变量；主 Agent 不读取或回传实际密钥。保存密钥不会切换模型服务或保存页面草稿，用户还需保存模式配置并完全重启 Codex。
+
 Hook 安装、启用、信任和实际成功运行是不同状态。`doctor` 成功不能证明 Hook 已自动触发。
 
 ## 改名与预览

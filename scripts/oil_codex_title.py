@@ -16,15 +16,18 @@ import time
 import unicodedata
 import uuid
 
-from codex_adapter import BackendError, ModelSkipped, CodexBackend, find_codex, generate_title, process_options
+from codex_adapter import BackendError, ModelSkipped, CodexBackend, find_codex, generate_title, process_options, worker_env
 import file_lock
 from usage_ledger import usage_scope, usage_report
+from model_config import validate_model_config, effective_model_config
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {
     "enabled": True,
     "model": "gpt-5.6-luna",
     "service_tier": "priority",
+    "provider": "official",
+    "relay": None,
     "codex_bin": None,
     "recent_turns": 5,
     "max_context_chars": 14000,
@@ -66,8 +69,7 @@ def atomic_json(path, value):
             os.unlink(filename)
 
 
-def load_config(root):
-    config = DEFAULTS | read_json(root / "config.json")
+def validate_config(config):
     if not isinstance(config["enabled"], bool):
         raise ValueError("enabled 必须是布尔值")
     for key, lower, upper in (("recent_turns", 3, 5), ("max_context_chars", 3000, 20000),
@@ -78,7 +80,59 @@ def load_config(root):
         raise ValueError("model 不能为空")
     if config["service_tier"] not in (None, "priority"):
         raise ValueError("service_tier 必须是 null（标准）或 priority（Fast）")
+    validate_model_config(config)
     return config
+
+
+def load_config(root):
+    return validate_config(DEFAULTS | read_json(root / "config.json"))
+
+
+def model_config_changes(config, saved, *, provider=None, model=None, service_tier=None,
+                         base_url=None, api_key_env=None):
+    """命令行和设置页共用修改规则，保留另一模式与未知顶层字段。"""
+    changes = dict(saved)
+    provider = provider or config["provider"]
+    if provider == "official" and (base_url is not None or api_key_env is not None):
+        raise ValueError("中转站参数需要 --provider relay")
+    target = changes
+    if provider == "relay":
+        target = dict(config["relay"] or {})
+        if base_url is not None:
+            target["base_url"] = base_url
+        if api_key_env is not None:
+            target["api_key_env"] = api_key_env
+        changes["relay"] = target
+    changes["provider"] = provider
+    if model is not None:
+        target["model"] = model
+        previous = (config["relay"] or {}).get("model") if provider == "relay" else config["model"]
+        if model != previous and service_tier is None:
+            target["service_tier"] = None
+    if service_tier is not None:
+        if service_tier not in ("standard", "fast"):
+            raise ValueError("service_tier 必须是 standard 或 fast")
+        target["service_tier"] = "priority" if service_tier == "fast" else None
+    validate_config(DEFAULTS | changes)
+    return changes
+
+
+def update_config(root, command, args=None):
+    with thread_lock(root, "config", wait_seconds=3) as acquired:
+        if not acquired:
+            raise BackendError("配置正在保存，请稍后重试")
+        config = load_config(root)
+        saved = read_json(root / "config.json")
+        if command in ("pause", "resume"):
+            saved["enabled"] = command == "resume"
+        else:
+            saved = model_config_changes(config, saved, provider=args.provider, model=args.model,
+                service_tier=args.service_tier, base_url=args.base_url, api_key_env=args.api_key_env)
+            if args.codex_bin:
+                saved["codex_bin"] = find_codex(args.codex_bin)
+        validate_config(DEFAULTS | saved)
+        atomic_json(root / "config.json", saved)
+        return load_config(root)
 
 
 def valid_id(value):
@@ -459,6 +513,13 @@ def doctor(binary, root, config, thread_id=None):
     version = subprocess.run([binary, "--version"], capture_output=True, encoding="utf-8", timeout=10, **process_options())
     output = {"codex_bin": binary, "version": version.stdout.strip(), "config": config,
               "data_dir": str(root), "desktop_display": "not_verified"}
+    effective = effective_model_config(config)
+    output["model_connection"] = {"provider": config["provider"], "model": effective["model"],
+                                  "inference": "not_verified"}
+    if config["provider"] == "relay":
+        env_key = config["relay"]["api_key_env"]
+        output["model_connection"].update(api_key_env=env_key,
+                                         api_key_present=bool(worker_env().get(env_key, "").strip()))
     # 仅检查定义，不创建或恢复任何会话，因此不会触发 SessionStart/Stop。
     with CodexBackend(binary, disable_hooks=False) as backend:
         cwd = str(Path.cwd())
@@ -498,10 +559,16 @@ def main():
     sub.add_parser("usage", help="汇总新版独立模型用量；缓存包含在输入中")
     sub.add_parser("pause", help="暂停自动命名")
     sub.add_parser("resume", help="恢复自动命名")
+    p = sub.add_parser("settings", help="打开本地可视化设置页；关闭进程即停止服务")
+    p.add_argument("--port", type=int, default=0, help="本地端口，默认自动选择")
+    p.add_argument("--no-browser", action="store_true", help="只输出入口地址，不打开系统浏览器")
     p = sub.add_parser("configure", help="配置独立命名模型或兼容的可执行文件")
     p.add_argument("--model")
     p.add_argument("--codex-bin")
     p.add_argument("--service-tier", choices=("standard", "fast"))
+    p.add_argument("--provider", choices=("official", "relay"), help="默认官方；中转站需显式选择 relay")
+    p.add_argument("--base-url", help="中转站 Responses API 基础地址，例如 https://relay.example/v1")
+    p.add_argument("--api-key-env", help="保存中转站密钥的环境变量名；不要填写密钥值")
     for name in ("rename", "lock", "unlock"):
         p = sub.add_parser(name)
         p.add_argument("thread_id")
@@ -514,6 +581,9 @@ def main():
     try:
         if sys.version_info < (3, 10):
             raise BackendError("需要 Python 3.10 或更新版本")
+        if args.command == "settings":
+            from settings_server import serve_settings
+            return serve_settings(root, port=args.port, open_browser=not args.no_browser)
         config = load_config(root)
         if is_hook:
             if os.environ.get("OIL_CODEX_TITLE_WORKER") == "1" or not config["enabled"]:
@@ -524,22 +594,7 @@ def main():
             thread_id = valid_id(event["session_id"])
             turn_id = valid_id(event["turn_id"])
         if args.command in ("pause", "resume", "configure"):
-            config_path = root / "config.json"
-            changes = read_json(config_path)
-            if args.command in ("pause", "resume"):
-                changes["enabled"] = args.command == "resume"
-            else:
-                if args.model:
-                    changes["model"] = args.model
-                    # 新模型未必支持 Fast；切换模型时不继承旧模型的服务档位。
-                    if args.model != config["model"] and not args.service_tier:
-                        changes["service_tier"] = None
-                if args.codex_bin:
-                    changes["codex_bin"] = find_codex(args.codex_bin)
-                if args.service_tier:
-                    changes["service_tier"] = "priority" if args.service_tier == "fast" else None
-            atomic_json(config_path, changes)
-            print(json.dumps(load_config(root), ensure_ascii=False))
+            print(json.dumps(update_config(root, args.command, args), ensure_ascii=False))
             return 0
         if args.command == "status":
             print(json.dumps({"config": config, "data_dir": str(root),

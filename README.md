@@ -33,10 +33,27 @@
 复制下面这段话发给 Codex：
 
 ```text
-帮我查找 GitHub 仓库 oil-oil/oil-codex-title，下载并安装完整插件，开启话题自动命名并检查是否生效。需要我在界面中确认的步骤，请告诉我怎么操作。
+帮我从 GitHub 仓库 MogooStudio/oil-codex-title 安装完整插件，使用仓库内的 mogoo-oil-title 插件市场，开启话题自动命名并检查是否生效。需要我在界面中信任 Hook 的步骤，请告诉我怎么操作。
 ```
 
 安装后，在新话题里正常聊天即可。默认使用 Luna Fast，消耗当前 Codex 账号的模型额度。
+
+此 fork 额外支持可选中转站，默认仍沿用原版官方调用方式。可通过 `configure --provider relay` 配置 API 基础地址、密钥环境变量名和模型；切回 `--provider official` 会恢复原有官方模型配置。详见 [中转站配置](docs/使用与边界.md#可选中转站配置)。
+
+也可以让 Codex「打开 oil-codex-title 的设置页面」，在本地页面选择官方或中转站、编辑配置并保存。命令入口为 `python3 scripts/oil_codex_title.py settings`（Windows 使用 `py -3`）。页面与后台 Hook 共用配置，保存后下次命名生效，详见 [可视化设置](docs/使用与边界.md#本地可视化设置)。
+
+命令行安装及后续更新：
+
+```sh
+codex plugin marketplace add MogooStudio/oil-codex-title --ref main
+codex plugin add oil-codex-title@mogoo-oil-title
+codex plugin marketplace upgrade mogoo-oil-title
+codex plugin add oil-codex-title@mogoo-oil-title
+```
+
+若原先已安装同名插件，请停用或卸载旧来源，避免同时加载两个自动命名 Hook。安装和更新不会自动信任 Hook；请在 Codex 官方 Hook 管理界面检查并信任新定义。
+
+本 fork 基于 [oil-oil/oil-codex-title](https://github.com/oil-oil/oil-codex-title)，保留原作者的 MIT 许可。[更新记录](CHANGELOG.zh.md)
 
 ## 日常怎么用
 
