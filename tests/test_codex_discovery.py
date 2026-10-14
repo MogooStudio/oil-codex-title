@@ -22,7 +22,8 @@ class CodexDiscoveryTests(unittest.TestCase):
         self.root.mkdir()
         self.paths = {}
         self.failures = {}
-        self.start_patch('codex_adapter.sys.platform', 'win32')
+        # sys 是共享模块；只替换适配器引用，文件锁仍使用真实宿主平台。
+        self.start_patch('codex_adapter.sys', SimpleNamespace(platform='win32'))
         self.start_patch('codex_adapter.platform.machine', return_value='AMD64')
         self.start_patch('codex_adapter.process_options', return_value={})
         environment = patch.dict(os.environ, {
