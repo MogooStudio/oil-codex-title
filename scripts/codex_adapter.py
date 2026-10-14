@@ -69,27 +69,61 @@ def windows_binary(path):
     raise BackendError("未找到 npm 入口对应的 codex.exe；请重装 Codex CLI 或通过 configure --codex-bin 指定原生路径")
 
 
-def find_codex(explicit: str | None = None) -> str:
-    if explicit:
-        resolved = shutil.which(explicit)
-        if resolved:
-            return windows_binary(resolved) if sys.platform == "win32" else resolved
-        raise BackendError("配置的 Codex 可执行文件不存在")
+def _codex_candidates():
+    """只查找 PATH 和当前用户的已知安装位置，不缓存桌面版本目录。"""
+    if sys.platform == "win32":
+        yield from ("codex.exe", "codex", "codex.cmd")
+        if os.environ.get("APPDATA"):
+            yield str(Path(os.environ["APPDATA"]) / "npm/codex.cmd")
+        if os.environ.get("LOCALAPPDATA"):
+            base = Path(os.environ["LOCALAPPDATA"]) / "OpenAI/Codex/bin"
+            yield str(base / "codex.exe")
+            versions = []
+            try:
+                for candidate in base.glob("*/codex.exe"):
+                    try:
+                        versions.append((candidate.stat().st_mtime_ns, str(candidate)))
+                    except OSError:
+                        continue  # 更新过程可能刚好清理旧版本。
+            except OSError:
+                pass
+            yield from (path for _, path in sorted(versions, reverse=True))
+        return
     if sys.platform == "darwin":
         for base in (Path("/Applications"), Path.home() / "Applications"):
             for app in ("ChatGPT.app", "Codex.app"):
-                candidate = base / app / "Contents/Resources/codex"
-                if candidate.is_file() and os.access(candidate, os.X_OK):
-                    return str(candidate)
-    if sys.platform == "win32":
-        path = shutil.which("codex.exe") or shutil.which("codex")
-        if path:
-            return windows_binary(path)
-        raise BackendError("未找到 Windows Codex CLI；请将 codex.exe 加入 PATH，或通过 configure --codex-bin 指定路径")
-    path = shutil.which("codex")
-    if not path:
-        raise BackendError("未找到 Codex；请安装并登录，或配置 codex_bin")
-    return path
+                yield str(base / app / "Contents/Resources/codex")
+    yield "codex"
+
+
+def find_codex(explicit: str | None = None, *, allow_fallback: bool = True) -> str:
+    """优先使用有效的指定入口；入口失效后重新发现并验证可启动的 CLI。"""
+    def candidates():
+        if explicit:
+            yield explicit
+        if not explicit or allow_fallback:
+            yield from _codex_candidates()
+
+    seen = set()
+    for entry in candidates():
+        try:
+            resolved = shutil.which(entry)
+            if not resolved:
+                raise BackendError("配置的 Codex 可执行文件不存在")
+            binary = windows_binary(resolved) if sys.platform == "win32" else resolved
+            key = os.path.normcase(str(Path(binary).resolve()))
+            if key in seen:
+                continue
+            seen.add(key)
+            version = subprocess.run([binary, "--version"], capture_output=True,
+                encoding="utf-8", errors="replace", timeout=3, **process_options())
+            if version.returncode or not re.match(r"^codex-cli\s+\S+", version.stdout.strip()):
+                raise BackendError("Codex 程序版本检查失败")
+            return binary
+        except (BackendError, OSError, subprocess.SubprocessError) as exc:
+            if explicit and not allow_fallback:
+                raise BackendError("指定的 Codex 入口不可用；请检查路径或使用 --codex-bin auto") from exc
+    raise BackendError("未找到可用的 Codex 程序；请安装 Codex CLI，或通过 configure --codex-bin 指定路径")
 
 
 def worker_env() -> dict[str, str]:

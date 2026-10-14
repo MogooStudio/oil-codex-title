@@ -21,7 +21,7 @@ Windows 下将示例的 `python3` 换成 `py -3`，需要已安装 Python Launch
 
 1. 执行 `python3 <入口> doctor`，检查 Python、Codex 路径和 App Server。
 2. 用户提供话题时，追加 `--thread <话题 ID>` 验证读取兼容性。
-3. 需要配置时，执行 `configure --model <模型 ID> --service-tier fast` 或 `--service-tier standard`；修正可执行文件使用 `configure --codex-bin <路径>`。模型和档位应来自用户选择或当前可用列表，不猜模型名。默认 Luna Fast，Spark 使用 standard。
+3. 需要配置时，执行 `configure --model <模型 ID> --service-tier fast` 或 `--service-tier standard`；指定优先入口使用 `configure --codex-bin <路径>`，恢复自动查找使用 `configure --codex-bin auto`。后台每次重新查找，旧入口失效时回退到可启动的 CLI；Windows 也检查当前用户的 npm 与桌面安装目录。模型和档位应来自用户选择或当前可用列表，不猜模型名。默认 Luna Fast，Spark 使用 standard。
 4. 安装及信任步骤见插件根目录的 `README.md`。只通过官方插件安装和 Hook 信任入口操作，不修改信任数据库，也不加绕过信任的参数。
 
 用户明确要求中转站时，读取插件根目录 `docs/使用与边界.md` 的「可选中转站配置」，用 `configure --provider relay --base-url <API基础地址> --api-key-env <密钥环境变量名> --model <模型ID>` 配置。密钥通过宿主环境提供，只保存变量名。默认官方模式保持原版行为；`configure --provider official` 切回已保存的官方模型与档位。`--model` 和 `--service-tier` 修改选中模式；中转站默认标准档位。`doctor` 的密钥存在检查和 App Server 就绪不能代替模型实测。

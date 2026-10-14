@@ -93,7 +93,10 @@ class PlatformTests(unittest.TestCase):
 
     def test_windows_native_path_is_preferred(self):
         exe = str(self.root / 'codex.exe')
-        with patch('codex_adapter.sys.platform', 'win32'), patch('codex_adapter.shutil.which', side_effect=lambda name: exe if name=='codex.exe' else None):
+        with patch('codex_adapter.sys.platform', 'win32'), \
+             patch('codex_adapter.shutil.which', side_effect=lambda name: exe if name=='codex.exe' else None), \
+             patch('codex_adapter.process_options', return_value={}), \
+             patch('codex_adapter.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='codex-cli 1.0.0')):
             self.assertEqual(find_codex(), exe)
 
     def test_windows_paths_cannot_leak_into_titles(self):

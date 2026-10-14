@@ -142,7 +142,14 @@ def update_config(root, command, args=None):
             saved = model_config_changes(config, saved, provider=args.provider, model=args.model,
                 service_tier=args.service_tier, base_url=args.base_url, api_key_env=args.api_key_env)
             if args.codex_bin:
-                saved["codex_bin"] = find_codex(args.codex_bin)
+                if args.codex_bin == "auto":
+                    find_codex()
+                    saved["codex_bin"] = None
+                else:
+                    find_codex(args.codex_bin, allow_fallback=False)
+                    # 保留命令名或 npm 入口，每次运行再解析原生程序；相对路径需固定工作目录。
+                    entry = Path(args.codex_bin).expanduser()
+                    saved["codex_bin"] = str(entry.resolve()) if entry.is_absolute() or entry.parent != Path(".") else str(entry)
             if getattr(args, "title_time", None) is not None:
                 saved["show_last_user_time"] = args.title_time == "on"
         validate_config(DEFAULTS | saved)
@@ -628,7 +635,7 @@ def main():
     p.add_argument("--no-browser", action="store_true", help="只输出入口地址，不打开系统浏览器")
     p = sub.add_parser("configure", help="配置独立命名模型或兼容的可执行文件")
     p.add_argument("--model")
-    p.add_argument("--codex-bin")
+    p.add_argument("--codex-bin", help="指定 Codex 入口；auto 恢复每次运行时自动查找")
     p.add_argument("--service-tier", choices=("standard", "fast"))
     p.add_argument("--provider", choices=("official", "relay"), help="默认官方；中转站需显式选择 relay")
     p.add_argument("--base-url", help="中转站 Responses API 基础地址，例如 https://relay.example/v1")
