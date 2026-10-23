@@ -23,6 +23,7 @@ class PlatformTests(unittest.TestCase):
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text(encoding='utf-8'))
         marketplace = json.loads((ROOT / '.agents/plugins/marketplace.json').read_text(encoding='utf-8'))
         publisher = marketplace['owner']['name']
+        self.assertEqual(publisher, 'mogoo')
         self.assertEqual(manifest['interface']['developerName'], publisher)
         self.assertEqual(manifest['author']['name'], publisher)
 
